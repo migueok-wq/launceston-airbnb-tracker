@@ -11,7 +11,7 @@ st.set_page_config(
 
 st.title("🏠 Launceston Airbnb Competitor Tracker")
 st.caption(
-    "Latest competitor availability and observed 2-night price quotes"
+    "Competitor availability, market signals and observed price quotes"
 )
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -42,6 +42,8 @@ competitor_order = [
     "Central City",
     "Moonshine",
 ]
+
+TOTAL_COMPETITORS = len(competitor_order)
 
 # --------------------------------------------------
 # LOAD AVAILABILITY
@@ -129,7 +131,7 @@ df = df[
     & (df["stay_date"] <= end_date)
 ].copy()
 
-# Latest observation for each competitor/date
+# Keep newest observation for each competitor/date
 df = (
     df.sort_values(
         "observed_at",
@@ -180,7 +182,6 @@ if not price_df.empty:
         .fillna(price_df["listing_name"])
     )
 
-    # Keep latest quote for each competitor/check-in/check-out
     price_df = (
         price_df.sort_values(
             "observed_at",
@@ -197,7 +198,7 @@ if not price_df.empty:
     )
 
 # --------------------------------------------------
-# BUILD PRICE LOOKUP
+# PRICE LOOKUP
 # --------------------------------------------------
 
 price_lookup = {}
@@ -219,23 +220,20 @@ if not price_df.empty:
                 "total_price_aud"
             ],
             "nights": row["nights"],
-            "checkout": row["checkout_date"],
         }
 
 # --------------------------------------------------
-# CREATE DISPLAY STATUS
+# COMPETITOR STATUS
 # --------------------------------------------------
 
 def display_status(row):
 
     if row["available"] is True:
 
-        min_nights = row["min_nights"]
-
-        if pd.notna(min_nights):
+        if pd.notna(row["min_nights"]):
             status = (
                 f"🟢 Available "
-                f"({int(min_nights)}n min)"
+                f"({int(row['min_nights'])}n min)"
             )
         else:
             status = "🟢 Available"
@@ -246,8 +244,6 @@ def display_status(row):
     else:
         status = "⚪ Unknown"
 
-    # Add a price quote only when this exact
-    # date was the check-in date of a quote.
     key = (
         str(row["listing_id"]),
         row["stay_date"],
@@ -257,13 +253,10 @@ def display_status(row):
 
     if quote:
 
-        average = quote["average"]
-        total = quote["total"]
-        nights = int(quote["nights"])
-
         status += (
-            f"\n💰 A${average:,.2f}/night avg"
-            f"\nA${total:,.2f} / {nights} nights"
+            f"\n💰 A${quote['average']:,.2f}/night avg"
+            f"\nA${quote['total']:,.2f} / "
+            f"{int(quote['nights'])} nights"
         )
 
     return status
@@ -275,7 +268,7 @@ df["status"] = df.apply(
 )
 
 # --------------------------------------------------
-# CREATE CALENDAR
+# COMPETITOR CALENDAR
 # --------------------------------------------------
 
 calendar = df.pivot(
@@ -293,12 +286,14 @@ calendar = calendar[
     competitor_order
 ]
 
+all_dates = pd.date_range(
+    today,
+    end_date,
+    freq="D",
+).date
+
 calendar = calendar.reindex(
-    pd.date_range(
-        today,
-        end_date,
-        freq="D",
-    ).date
+    all_dates
 )
 
 calendar = calendar.fillna(
@@ -309,6 +304,73 @@ calendar.index = [
     day.strftime("%a %d %b")
     for day in calendar.index
 ]
+
+# --------------------------------------------------
+# MARKET AVAILABILITY SIGNAL
+# --------------------------------------------------
+
+market_rows = []
+
+for stay_date in all_dates:
+
+    day_data = df[
+        df["stay_date"] == stay_date
+    ]
+
+    available = int(
+        (day_data["available"] == True).sum()
+    )
+
+    unavailable = int(
+        (day_data["available"] == False).sum()
+    )
+
+    observed = available + unavailable
+
+    if observed == 0:
+
+        availability_pct = None
+        signal = "⚪ No data"
+
+    else:
+
+        availability_pct = (
+            available / observed
+        ) * 100
+
+        if available == 0:
+            signal = "🔥 Very tight"
+
+        elif availability_pct <= 25:
+            signal = "🟠 Tight"
+
+        elif availability_pct <= 50:
+            signal = "🟡 Moderate"
+
+        elif availability_pct <= 75:
+            signal = "🔵 Available"
+
+        else:
+            signal = "🟢 High availability"
+
+    market_rows.append(
+        {
+            "Date": stay_date,
+            "Available competitors":
+                f"{available}/{observed}",
+            "Market availability":
+                availability_pct,
+            "Signal": signal,
+        }
+    )
+
+market_df = pd.DataFrame(
+    market_rows
+)
+
+market_df["Date"] = pd.to_datetime(
+    market_df["Date"]
+).dt.strftime("%a %d %b")
 
 # --------------------------------------------------
 # SUMMARY
@@ -328,7 +390,18 @@ unavailable_count = int(
 
 quote_count = len(price_df)
 
-col1, col2, col3, col4 = st.columns(4)
+tight_days = int(
+    market_df["Signal"]
+    .isin(
+        [
+            "🔥 Very tight",
+            "🟠 Tight",
+        ]
+    )
+    .sum()
+)
+
+col1, col2, col3, col4, col5 = st.columns(5)
 
 col1.metric(
     "Available",
@@ -341,11 +414,16 @@ col2.metric(
 )
 
 col3.metric(
+    "Tight market days",
+    tight_days,
+)
+
+col4.metric(
     "Price quotes",
     quote_count,
 )
 
-col4.metric(
+col5.metric(
     "Latest update",
     latest_observation.strftime(
         "%d %b %Y"
@@ -355,10 +433,47 @@ col4.metric(
 st.divider()
 
 # --------------------------------------------------
-# CALENDAR
+# MARKET SIGNAL
 # --------------------------------------------------
 
-st.subheader("📅 Competitor calendar — next 30 days")
+st.subheader("🔥 Market availability — next 30 days")
+
+market_display = market_df.copy()
+
+market_display[
+    "Market availability"
+] = market_display[
+    "Market availability"
+].apply(
+    lambda x:
+        f"{x:.0f}%"
+        if pd.notna(x)
+        else "No data"
+)
+
+st.dataframe(
+    market_display,
+    use_container_width=True,
+    hide_index=True,
+    height=500,
+)
+
+st.caption(
+    "Market availability is based only on the four tracked "
+    "competitors. A tight signal means fewer tracked listings "
+    "are showing as available. It does not prove that unavailable "
+    "properties are booked."
+)
+
+st.divider()
+
+# --------------------------------------------------
+# COMPETITOR CALENDAR
+# --------------------------------------------------
+
+st.subheader(
+    "📅 Competitor calendar — next 30 days"
+)
 
 st.dataframe(
     calendar,
@@ -371,8 +486,7 @@ st.caption(
     "🔴 Unavailable does not necessarily mean booked; "
     "the date may be booked, blocked, or restricted. "
     "💰 Prices are observed stay quotes. The displayed "
-    "per-night value is the average for the quoted stay, "
-    "not the confirmed price of an individual night."
+    "per-night value is the average for the quoted stay."
 )
 
 # --------------------------------------------------
@@ -380,7 +494,10 @@ st.caption(
 # --------------------------------------------------
 
 st.divider()
-st.subheader("💰 Latest observed price quotes")
+
+st.subheader(
+    "💰 Latest observed price quotes"
+)
 
 if price_df.empty:
 
