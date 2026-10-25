@@ -11,7 +11,8 @@ st.set_page_config(
 
 st.title("🏠 Launceston Airbnb Competitor Tracker")
 st.caption(
-    "Competitor availability, market signals and observed price quotes"
+    "Competitor availability, recent changes, market signals "
+    "and observed price quotes"
 )
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -43,10 +44,8 @@ competitor_order = [
     "Moonshine",
 ]
 
-TOTAL_COMPETITORS = len(competitor_order)
-
 # --------------------------------------------------
-# LOAD AVAILABILITY
+# LOAD AVAILABILITY HISTORY
 # --------------------------------------------------
 
 calendar_params = {
@@ -54,7 +53,7 @@ calendar_params = {
         "listing_id,listing_name,stay_date,"
         "available,available_for_checkin,"
         "available_for_checkout,min_nights,"
-        "observed_at"
+        "observed_at,apify_run_id"
     ),
     "stay_date": f"gte.{today.isoformat()}",
     "order": "observed_at.desc",
@@ -62,20 +61,137 @@ calendar_params = {
 }
 
 try:
-    calendar_response = requests.get(
+    response = requests.get(
         f"{SUPABASE_URL}/rest/v1/airbnb_calendar_history",
         headers=headers,
         params=calendar_params,
         timeout=30,
     )
 
-    calendar_response.raise_for_status()
-    calendar_data = calendar_response.json()
+    response.raise_for_status()
+    calendar_data = response.json()
 
 except Exception as error:
     st.error("Could not load availability data.")
     st.code(str(error))
     st.stop()
+
+history_df = pd.DataFrame(calendar_data)
+
+if history_df.empty:
+    st.warning("No availability data found.")
+    st.stop()
+
+history_df["stay_date"] = pd.to_datetime(
+    history_df["stay_date"]
+).dt.date
+
+history_df["observed_at"] = pd.to_datetime(
+    history_df["observed_at"],
+    utc=True,
+)
+
+history_df = history_df[
+    (history_df["stay_date"] >= today)
+    & (history_df["stay_date"] <= end_date)
+].copy()
+
+history_df["competitor"] = (
+    history_df["listing_id"]
+    .astype(str)
+    .map(NAME_MAP)
+    .fillna(history_df["listing_name"])
+)
+
+# --------------------------------------------------
+# LATEST AVAILABILITY
+# --------------------------------------------------
+
+df = (
+    history_df.sort_values(
+        "observed_at",
+        ascending=False,
+    )
+    .drop_duplicates(
+        subset=["listing_id", "stay_date"],
+        keep="first",
+    )
+    .copy()
+)
+
+# --------------------------------------------------
+# CHANGE DETECTION
+# --------------------------------------------------
+# We compare the latest TWO DISTINCT observations
+# for each competitor + stay date.
+#
+# Important:
+# unavailable does NOT automatically mean booked.
+
+change_rows = []
+
+for (listing_id, stay_date), group in history_df.groupby(
+    ["listing_id", "stay_date"]
+):
+
+    group = (
+        group.sort_values(
+            "observed_at",
+            ascending=False,
+        )
+        .drop_duplicates(
+            subset=["apify_run_id"],
+            keep="first",
+        )
+    )
+
+    if len(group) < 2:
+        continue
+
+    latest = group.iloc[0]
+    previous = group.iloc[1]
+
+    latest_available = latest["available"]
+    previous_available = previous["available"]
+
+    if pd.isna(latest_available) or pd.isna(previous_available):
+        continue
+
+    # Available -> unavailable
+    if (
+        bool(previous_available) is True
+        and bool(latest_available) is False
+    ):
+        change_rows.append(
+            {
+                "listing_id": str(listing_id),
+                "competitor": latest["competitor"],
+                "stay_date": stay_date,
+                "change": "📉 Availability lost",
+                "previous": "Available",
+                "current": "Unavailable",
+                "observed_at": latest["observed_at"],
+            }
+        )
+
+    # Unavailable -> available
+    elif (
+        bool(previous_available) is False
+        and bool(latest_available) is True
+    ):
+        change_rows.append(
+            {
+                "listing_id": str(listing_id),
+                "competitor": latest["competitor"],
+                "stay_date": stay_date,
+                "change": "📈 Availability opened",
+                "previous": "Unavailable",
+                "current": "Available",
+                "observed_at": latest["observed_at"],
+            }
+        )
+
+changes_df = pd.DataFrame(change_rows)
 
 # --------------------------------------------------
 # LOAD PRICE QUOTES
@@ -108,52 +224,6 @@ except Exception as error:
     st.code(str(error))
     st.stop()
 
-# --------------------------------------------------
-# PREPARE AVAILABILITY
-# --------------------------------------------------
-
-df = pd.DataFrame(calendar_data)
-
-if df.empty:
-    st.warning("No availability data found.")
-    st.stop()
-
-df["stay_date"] = pd.to_datetime(
-    df["stay_date"]
-).dt.date
-
-df["observed_at"] = pd.to_datetime(
-    df["observed_at"]
-)
-
-df = df[
-    (df["stay_date"] >= today)
-    & (df["stay_date"] <= end_date)
-].copy()
-
-# Keep newest observation for each competitor/date
-df = (
-    df.sort_values(
-        "observed_at",
-        ascending=False,
-    )
-    .drop_duplicates(
-        subset=["listing_id", "stay_date"],
-        keep="first",
-    )
-)
-
-df["competitor"] = (
-    df["listing_id"]
-    .astype(str)
-    .map(NAME_MAP)
-    .fillna(df["listing_name"])
-)
-
-# --------------------------------------------------
-# PREPARE PRICE QUOTES
-# --------------------------------------------------
-
 price_df = pd.DataFrame(price_data)
 
 if not price_df.empty:
@@ -167,7 +237,8 @@ if not price_df.empty:
     ).dt.date
 
     price_df["observed_at"] = pd.to_datetime(
-        price_df["observed_at"]
+        price_df["observed_at"],
+        utc=True,
     )
 
     price_df = price_df[
@@ -216,14 +287,12 @@ if not price_df.empty:
             "average": row[
                 "average_price_per_night_aud"
             ],
-            "total": row[
-                "total_price_aud"
-            ],
+            "total": row["total_price_aud"],
             "nights": row["nights"],
         }
 
 # --------------------------------------------------
-# COMPETITOR STATUS
+# DISPLAY STATUS
 # --------------------------------------------------
 
 def display_status(row):
@@ -252,7 +321,6 @@ def display_status(row):
     quote = price_lookup.get(key)
 
     if quote:
-
         status += (
             f"\n💰 A${quote['average']:,.2f}/night avg"
             f"\nA${quote['total']:,.2f} / "
@@ -278,13 +346,10 @@ calendar = df.pivot(
 )
 
 for competitor in competitor_order:
-
     if competitor not in calendar.columns:
         calendar[competitor] = "⚪ No data"
 
-calendar = calendar[
-    competitor_order
-]
+calendar = calendar[competitor_order]
 
 all_dates = pd.date_range(
     today,
@@ -292,13 +357,8 @@ all_dates = pd.date_range(
     freq="D",
 ).date
 
-calendar = calendar.reindex(
-    all_dates
-)
-
-calendar = calendar.fillna(
-    "⚪ No data"
-)
+calendar = calendar.reindex(all_dates)
+calendar = calendar.fillna("⚪ No data")
 
 calendar.index = [
     day.strftime("%a %d %b")
@@ -306,7 +366,7 @@ calendar.index = [
 ]
 
 # --------------------------------------------------
-# MARKET AVAILABILITY SIGNAL
+# MARKET AVAILABILITY
 # --------------------------------------------------
 
 market_rows = []
@@ -353,6 +413,29 @@ for stay_date in all_dates:
         else:
             signal = "🟢 High availability"
 
+    # Count latest detected losses for this date
+    if changes_df.empty:
+        losses = 0
+        openings = 0
+    else:
+        day_changes = changes_df[
+            changes_df["stay_date"] == stay_date
+        ]
+
+        losses = int(
+            (
+                day_changes["change"]
+                == "📉 Availability lost"
+            ).sum()
+        )
+
+        openings = int(
+            (
+                day_changes["change"]
+                == "📈 Availability opened"
+            ).sum()
+        )
+
     market_rows.append(
         {
             "Date": stay_date,
@@ -360,13 +443,13 @@ for stay_date in all_dates:
                 f"{available}/{observed}",
             "Market availability":
                 availability_pct,
+            "Recent losses": losses,
+            "Recent openings": openings,
             "Signal": signal,
         }
     )
 
-market_df = pd.DataFrame(
-    market_rows
-)
+market_df = pd.DataFrame(market_rows)
 
 market_df["Date"] = pd.to_datetime(
     market_df["Date"]
@@ -401,7 +484,21 @@ tight_days = int(
     .sum()
 )
 
-col1, col2, col3, col4, col5 = st.columns(5)
+if changes_df.empty:
+    recent_losses = 0
+else:
+    recent_losses = int(
+        (
+            changes_df["change"]
+            == "📉 Availability lost"
+        ).sum()
+    )
+
+# --------------------------------------------------
+# TOP METRICS
+# --------------------------------------------------
+
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 col1.metric(
     "Available",
@@ -419,11 +516,16 @@ col3.metric(
 )
 
 col4.metric(
+    "Recent losses",
+    recent_losses,
+)
+
+col5.metric(
     "Price quotes",
     quote_count,
 )
 
-col5.metric(
+col6.metric(
     "Latest update",
     latest_observation.strftime(
         "%d %b %Y"
@@ -433,10 +535,12 @@ col5.metric(
 st.divider()
 
 # --------------------------------------------------
-# MARKET SIGNAL
+# MARKET SIGNAL TABLE
 # --------------------------------------------------
 
-st.subheader("🔥 Market availability — next 30 days")
+st.subheader(
+    "🔥 Market availability — next 30 days"
+)
 
 market_display = market_df.copy()
 
@@ -459,11 +563,73 @@ st.dataframe(
 )
 
 st.caption(
-    "Market availability is based only on the four tracked "
-    "competitors. A tight signal means fewer tracked listings "
-    "are showing as available. It does not prove that unavailable "
-    "properties are booked."
+    "Market availability is based on the four tracked "
+    "competitors. Recent losses/openings compare the latest "
+    "two snapshots. A loss does not prove a booking; a host "
+    "may also block or restrict a date."
 )
+
+st.divider()
+
+# --------------------------------------------------
+# RECENT AVAILABILITY CHANGES
+# --------------------------------------------------
+
+st.subheader(
+    "🔄 Recent availability changes"
+)
+
+if changes_df.empty:
+
+    st.info(
+        "No availability changes were detected between "
+        "the latest two snapshots."
+    )
+
+else:
+
+    changes_display = changes_df[
+        [
+            "competitor",
+            "stay_date",
+            "previous",
+            "current",
+            "change",
+            "observed_at",
+        ]
+    ].copy()
+
+    changes_display = changes_display.rename(
+        columns={
+            "competitor": "Competitor",
+            "stay_date": "Stay date",
+            "previous": "Previous",
+            "current": "Current",
+            "change": "Change",
+            "observed_at": "Detected",
+        }
+    )
+
+    changes_display["Stay date"] = pd.to_datetime(
+        changes_display["Stay date"]
+    ).dt.strftime("%a %d %b")
+
+    changes_display["Detected"] = (
+        changes_display["Detected"]
+        .dt.tz_convert("Australia/Hobart")
+        .dt.strftime("%d %b %Y %H:%M")
+    )
+
+    changes_display = changes_display.sort_values(
+        ["Detected", "Stay date"],
+        ascending=[False, True],
+    )
+
+    st.dataframe(
+        changes_display,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 st.divider()
 
@@ -484,9 +650,9 @@ st.dataframe(
 st.caption(
     "🟢 Available = Airbnb currently allows the date. "
     "🔴 Unavailable does not necessarily mean booked; "
-    "the date may be booked, blocked, or restricted. "
-    "💰 Prices are observed stay quotes. The displayed "
-    "per-night value is the average for the quoted stay."
+    "it may be booked, blocked or restricted. "
+    "💰 Price is the average nightly value of an "
+    "observed stay quote, not an exact nightly rate."
 )
 
 # --------------------------------------------------
@@ -535,6 +701,7 @@ else:
 
     price_table["Observed"] = (
         price_table["Observed"]
+        .dt.tz_convert("Australia/Hobart")
         .dt.strftime("%d %b %Y %H:%M")
     )
 
