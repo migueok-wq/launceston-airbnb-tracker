@@ -28,7 +28,7 @@ headers = {
 # --------------------------------------------------
 
 today = date.today()
-end_date = today + timedelta(days=30)
+max_end_date = today + timedelta(days=90)
 
 NAME_MAP = {
     "1611465816539756387": "Hideaway",
@@ -45,6 +45,22 @@ competitor_order = [
 ]
 
 # --------------------------------------------------
+# DASHBOARD RANGE
+# --------------------------------------------------
+
+range_option = st.segmented_control(
+    "Dashboard horizon",
+    options=[30, 60, 90],
+    default=90,
+    format_func=lambda x: f"Next {x} days",
+)
+
+if range_option is None:
+    range_option = 90
+
+end_date = today + timedelta(days=range_option)
+
+# --------------------------------------------------
 # LOAD AVAILABILITY HISTORY
 # --------------------------------------------------
 
@@ -57,7 +73,7 @@ calendar_params = {
     ),
     "stay_date": f"gte.{today.isoformat()}",
     "order": "observed_at.desc",
-    "limit": "5000",
+    "limit": "10000",
 }
 
 try:
@@ -67,7 +83,6 @@ try:
         params=calendar_params,
         timeout=30,
     )
-
     response.raise_for_status()
     calendar_data = response.json()
 
@@ -93,7 +108,7 @@ history_df["observed_at"] = pd.to_datetime(
 
 history_df = history_df[
     (history_df["stay_date"] >= today)
-    & (history_df["stay_date"] <= end_date)
+    & (history_df["stay_date"] <= max_end_date)
 ].copy()
 
 history_df["competitor"] = (
@@ -104,11 +119,20 @@ history_df["competitor"] = (
 )
 
 # --------------------------------------------------
+# FILTER SELECTED RANGE
+# --------------------------------------------------
+
+range_history_df = history_df[
+    history_df["stay_date"] <= end_date
+].copy()
+
+# --------------------------------------------------
 # LATEST AVAILABILITY
 # --------------------------------------------------
 
 df = (
-    history_df.sort_values(
+    range_history_df
+    .sort_values(
         "observed_at",
         ascending=False,
     )
@@ -122,15 +146,10 @@ df = (
 # --------------------------------------------------
 # CHANGE DETECTION
 # --------------------------------------------------
-# We compare the latest TWO DISTINCT observations
-# for each competitor + stay date.
-#
-# Important:
-# unavailable does NOT automatically mean booked.
 
 change_rows = []
 
-for (listing_id, stay_date), group in history_df.groupby(
+for (listing_id, stay_date), group in range_history_df.groupby(
     ["listing_id", "stay_date"]
 ):
 
@@ -157,7 +176,6 @@ for (listing_id, stay_date), group in history_df.groupby(
     if pd.isna(latest_available) or pd.isna(previous_available):
         continue
 
-    # Available -> unavailable
     if (
         bool(previous_available) is True
         and bool(latest_available) is False
@@ -174,7 +192,6 @@ for (listing_id, stay_date), group in history_df.groupby(
             }
         )
 
-    # Unavailable -> available
     elif (
         bool(previous_available) is False
         and bool(latest_available) is True
@@ -205,7 +222,7 @@ price_params = {
     ),
     "checkin_date": f"gte.{today.isoformat()}",
     "order": "observed_at.desc",
-    "limit": "5000",
+    "limit": "10000",
 }
 
 try:
@@ -215,7 +232,6 @@ try:
         params=price_params,
         timeout=30,
     )
-
     price_response.raise_for_status()
     price_data = price_response.json()
 
@@ -336,34 +352,14 @@ df["status"] = df.apply(
 )
 
 # --------------------------------------------------
-# COMPETITOR CALENDAR
+# ALL DATES
 # --------------------------------------------------
-
-calendar = df.pivot(
-    index="stay_date",
-    columns="competitor",
-    values="status",
-)
-
-for competitor in competitor_order:
-    if competitor not in calendar.columns:
-        calendar[competitor] = "⚪ No data"
-
-calendar = calendar[competitor_order]
 
 all_dates = pd.date_range(
     today,
     end_date,
     freq="D",
 ).date
-
-calendar = calendar.reindex(all_dates)
-calendar = calendar.fillna("⚪ No data")
-
-calendar.index = [
-    day.strftime("%a %d %b")
-    for day in calendar.index
-]
 
 # --------------------------------------------------
 # MARKET AVAILABILITY
@@ -413,11 +409,12 @@ for stay_date in all_dates:
         else:
             signal = "🟢 High availability"
 
-    # Count latest detected losses for this date
     if changes_df.empty:
         losses = 0
         openings = 0
+
     else:
+
         day_changes = changes_df[
             changes_df["stay_date"] == stay_date
         ]
@@ -439,10 +436,9 @@ for stay_date in all_dates:
     market_rows.append(
         {
             "Date": stay_date,
-            "Available competitors":
-                f"{available}/{observed}",
-            "Market availability":
-                availability_pct,
+            "Available": available,
+            "Observed": observed,
+            "Market availability": availability_pct,
             "Recent losses": losses,
             "Recent openings": openings,
             "Signal": signal,
@@ -451,12 +447,8 @@ for stay_date in all_dates:
 
 market_df = pd.DataFrame(market_rows)
 
-market_df["Date"] = pd.to_datetime(
-    market_df["Date"]
-).dt.strftime("%a %d %b")
-
 # --------------------------------------------------
-# SUMMARY
+# SUMMARY METRICS
 # --------------------------------------------------
 
 latest_observation = df[
@@ -498,6 +490,10 @@ else:
 # TOP METRICS
 # --------------------------------------------------
 
+st.subheader(
+    f"Overview — next {range_option} days"
+)
+
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 col1.metric(
@@ -535,14 +531,58 @@ col6.metric(
 st.divider()
 
 # --------------------------------------------------
-# MARKET SIGNAL TABLE
+# MARKET AVAILABILITY CHART
 # --------------------------------------------------
 
 st.subheader(
-    "🔥 Market availability — next 30 days"
+    f"📈 Market availability — next {range_option} days"
 )
 
+chart_df = market_df[
+    [
+        "Date",
+        "Market availability",
+    ]
+].copy()
+
+chart_df = chart_df.dropna(
+    subset=["Market availability"]
+)
+
+chart_df = chart_df.set_index("Date")
+
+st.line_chart(
+    chart_df,
+    y="Market availability",
+    height=350,
+)
+
+st.caption(
+    "The chart shows the percentage of tracked competitors "
+    "displaying availability for each date. 0% means none of "
+    "the four tracked competitors are currently showing as "
+    "available; 100% means all four are showing availability."
+)
+
+# --------------------------------------------------
+# MARKET TABLE
+# --------------------------------------------------
+
+st.subheader("🔥 Daily market signal")
+
 market_display = market_df.copy()
+
+market_display["Date"] = pd.to_datetime(
+    market_display["Date"]
+).dt.strftime("%a %d %b")
+
+market_display[
+    "Available competitors"
+] = (
+    market_display["Available"].astype(str)
+    + "/"
+    + market_display["Observed"].astype(str)
+)
 
 market_display[
     "Market availability"
@@ -555,6 +595,17 @@ market_display[
         else "No data"
 )
 
+market_display = market_display[
+    [
+        "Date",
+        "Available competitors",
+        "Market availability",
+        "Recent losses",
+        "Recent openings",
+        "Signal",
+    ]
+]
+
 st.dataframe(
     market_display,
     use_container_width=True,
@@ -564,15 +615,15 @@ st.dataframe(
 
 st.caption(
     "Market availability is based on the four tracked "
-    "competitors. Recent losses/openings compare the latest "
-    "two snapshots. A loss does not prove a booking; a host "
-    "may also block or restrict a date."
+    "competitors. A tight signal means fewer tracked listings "
+    "are showing availability. It does not prove that "
+    "unavailable properties are booked."
 )
 
 st.divider()
 
 # --------------------------------------------------
-# RECENT AVAILABILITY CHANGES
+# RECENT CHANGES
 # --------------------------------------------------
 
 st.subheader(
@@ -620,13 +671,11 @@ else:
         .dt.strftime("%d %b %Y %H:%M")
     )
 
-    changes_display = changes_display.sort_values(
-        ["Detected", "Stay date"],
-        ascending=[False, True],
-    )
-
     st.dataframe(
-        changes_display,
+        changes_display.sort_values(
+            ["Detected", "Stay date"],
+            ascending=[False, True],
+        ),
         use_container_width=True,
         hide_index=True,
     )
@@ -638,8 +687,36 @@ st.divider()
 # --------------------------------------------------
 
 st.subheader(
-    "📅 Competitor calendar — next 30 days"
+    f"📅 Competitor calendar — next {range_option} days"
 )
+
+calendar = df.pivot(
+    index="stay_date",
+    columns="competitor",
+    values="status",
+)
+
+for competitor in competitor_order:
+
+    if competitor not in calendar.columns:
+        calendar[competitor] = "⚪ No data"
+
+calendar = calendar[
+    competitor_order
+]
+
+calendar = calendar.reindex(
+    all_dates
+)
+
+calendar = calendar.fillna(
+    "⚪ No data"
+)
+
+calendar.index = [
+    day.strftime("%a %d %b")
+    for day in calendar.index
+]
 
 st.dataframe(
     calendar,
@@ -651,25 +728,26 @@ st.caption(
     "🟢 Available = Airbnb currently allows the date. "
     "🔴 Unavailable does not necessarily mean booked; "
     "it may be booked, blocked or restricted. "
-    "💰 Price is the average nightly value of an "
-    "observed stay quote, not an exact nightly rate."
+    "💰 Price is the average nightly value of an observed "
+    "stay quote, not an exact nightly rate."
 )
+
+st.divider()
 
 # --------------------------------------------------
 # PRICE QUOTES
 # --------------------------------------------------
 
-st.divider()
-
 st.subheader(
-    "💰 Latest observed price quotes"
+    f"💰 Latest observed price quotes — "
+    f"next {range_option} days"
 )
 
 if price_df.empty:
 
     st.info(
         "No price quotes are currently available "
-        "for the next 30 days."
+        "for the selected period."
     )
 
 else:
