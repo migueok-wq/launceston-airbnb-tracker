@@ -17,8 +17,8 @@ st.set_page_config(
 st.title("🏠 Launceston Airbnb Competitor Tracker")
 
 st.caption(
-    "Competitor availability, recent changes, market signals "
-    "and observed price quotes"
+    "Competitor availability, recent changes, market signals, "
+    "observed price quotes and suggested pricing"
 )
 
 
@@ -56,6 +56,66 @@ competitor_order = [
     "Moonshine",
 ]
 
+NUMBER_OF_COMPETITORS = 4
+
+# Our pricing assumptions
+STAY_NIGHTS = 2
+CLEANING_FEE = 50.00
+
+# Estimated Airbnb host fee:
+# 15.5% fee + 10% GST on that fee
+AIRBNB_FEE_RATE = 0.1705
+
+
+# ==================================================
+# HELPER FUNCTIONS
+# ==================================================
+
+def round_to_nearest_5(value):
+    """Round a price to the nearest A$5."""
+
+    return round(value / 5) * 5
+
+
+def market_adjustment(signal):
+    """
+    Pricing adjustment based on competitor availability.
+    """
+
+    adjustments = {
+        "🔥 Very tight": 1.10,
+        "🟠 Tight": 1.05,
+        "🟡 Moderate": 1.00,
+        "🔵 Available": 0.97,
+        "🟢 High availability": 0.93,
+    }
+
+    return adjustments.get(
+        signal,
+        1.00,
+    )
+
+
+def confidence_label(coverage):
+    """
+    Confidence based on how many competitors
+    returned a valid price quote.
+    """
+
+    if coverage >= 4:
+        return "🟢 High"
+
+    if coverage == 3:
+        return "🟢 Good"
+
+    if coverage == 2:
+        return "🟡 Medium"
+
+    if coverage == 1:
+        return "⚠️ Low"
+
+    return "⚪ No data"
+
 
 # ==================================================
 # DASHBOARD RANGE
@@ -71,7 +131,9 @@ range_option = st.segmented_control(
 if range_option is None:
     range_option = 90
 
-end_date = today + timedelta(days=range_option)
+end_date = today + timedelta(
+    days=range_option
+)
 
 
 # ==================================================
@@ -213,13 +275,8 @@ for (
     latest = group.iloc[0]
     previous = group.iloc[1]
 
-    latest_available = (
-        latest["available"]
-    )
-
-    previous_available = (
-        previous["available"]
-    )
+    latest_available = latest["available"]
+    previous_available = previous["available"]
 
     if (
         pd.isna(latest_available)
@@ -227,7 +284,6 @@ for (
     ):
         continue
 
-    # Available -> unavailable
     if (
         bool(previous_available) is True
         and bool(latest_available) is False
@@ -235,25 +291,16 @@ for (
 
         change_rows.append(
             {
-                "listing_id": str(
-                    listing_id
-                ),
-                "competitor":
-                    latest["competitor"],
-                "stay_date":
-                    stay_date,
-                "change":
-                    "📉 Availability lost",
-                "previous":
-                    "Available",
-                "current":
-                    "Unavailable",
-                "observed_at":
-                    latest["observed_at"],
+                "listing_id": str(listing_id),
+                "competitor": latest["competitor"],
+                "stay_date": stay_date,
+                "change": "📉 Availability lost",
+                "previous": "Available",
+                "current": "Unavailable",
+                "observed_at": latest["observed_at"],
             }
         )
 
-    # Unavailable -> available
     elif (
         bool(previous_available) is False
         and bool(latest_available) is True
@@ -261,21 +308,13 @@ for (
 
         change_rows.append(
             {
-                "listing_id": str(
-                    listing_id
-                ),
-                "competitor":
-                    latest["competitor"],
-                "stay_date":
-                    stay_date,
-                "change":
-                    "📈 Availability opened",
-                "previous":
-                    "Unavailable",
-                "current":
-                    "Available",
-                "observed_at":
-                    latest["observed_at"],
+                "listing_id": str(listing_id),
+                "competitor": latest["competitor"],
+                "stay_date": stay_date,
+                "change": "📈 Availability opened",
+                "previous": "Unavailable",
+                "current": "Available",
+                "observed_at": latest["observed_at"],
             }
         )
 
@@ -311,9 +350,7 @@ try:
 
     price_response.raise_for_status()
 
-    price_data = (
-        price_response.json()
-    )
+    price_data = price_response.json()
 
 except Exception as error:
 
@@ -333,23 +370,17 @@ price_df = pd.DataFrame(
 
 if not price_df.empty:
 
-    price_df["checkin_date"] = (
-        pd.to_datetime(
-            price_df["checkin_date"]
-        ).dt.date
-    )
+    price_df["checkin_date"] = pd.to_datetime(
+        price_df["checkin_date"]
+    ).dt.date
 
-    price_df["checkout_date"] = (
-        pd.to_datetime(
-            price_df["checkout_date"]
-        ).dt.date
-    )
+    price_df["checkout_date"] = pd.to_datetime(
+        price_df["checkout_date"]
+    ).dt.date
 
-    price_df["observed_at"] = (
-        pd.to_datetime(
-            price_df["observed_at"],
-            utc=True,
-        )
+    price_df["observed_at"] = pd.to_datetime(
+        price_df["observed_at"],
+        utc=True,
     )
 
     price_df[
@@ -385,13 +416,11 @@ if not price_df.empty:
         price_df["listing_id"]
         .astype(str)
         .map(NAME_MAP)
-        .fillna(
-            price_df["listing_name"]
-        )
+        .fillna(price_df["listing_name"])
     )
 
-    # Keep latest quote for each
-    # competitor/check-in/check-out
+    # Keep the latest quote for each
+    # competitor / check-in / check-out.
     price_df = (
         price_df
         .sort_values(
@@ -410,7 +439,7 @@ if not price_df.empty:
 
 
 # ==================================================
-# PRICE LOOKUP
+# PRICE LOOKUP FOR CALENDAR
 # ==================================================
 
 price_lookup = {}
@@ -425,19 +454,20 @@ if not price_df.empty:
         )
 
         price_lookup[key] = {
-            "average":
-                row[
-                    "average_price_per_night_aud"
-                ],
-            "total":
-                row["total_price_aud"],
-            "nights":
-                row["nights"],
+            "average": row[
+                "average_price_per_night_aud"
+            ],
+            "total": row[
+                "total_price_aud"
+            ],
+            "nights": row[
+                "nights"
+            ],
         }
 
 
 # ==================================================
-# DISPLAY STATUS
+# CALENDAR DISPLAY STATUS
 # ==================================================
 
 def display_status(row):
@@ -482,17 +512,9 @@ def display_status(row):
 
     if quote:
 
-        average = quote[
-            "average"
-        ]
-
-        total = quote[
-            "total"
-        ]
-
-        nights = quote[
-            "nights"
-        ]
+        average = quote["average"]
+        total = quote["total"]
+        nights = quote["nights"]
 
         if (
             pd.notna(average)
@@ -561,10 +583,7 @@ for stay_date in all_dates:
     if observed == 0:
 
         availability_pct = None
-
-        signal = (
-            "⚪ No data"
-        )
+        signal = "⚪ No data"
 
     else:
 
@@ -575,27 +594,19 @@ for stay_date in all_dates:
 
         if available == 0:
 
-            signal = (
-                "🔥 Very tight"
-            )
+            signal = "🔥 Very tight"
 
         elif availability_pct <= 25:
 
-            signal = (
-                "🟠 Tight"
-            )
+            signal = "🟠 Tight"
 
         elif availability_pct <= 50:
 
-            signal = (
-                "🟡 Moderate"
-            )
+            signal = "🟡 Moderate"
 
         elif availability_pct <= 75:
 
-            signal = (
-                "🔵 Available"
-            )
+            signal = "🔵 Available"
 
         else:
 
@@ -631,20 +642,14 @@ for stay_date in all_dates:
 
     market_rows.append(
         {
-            "Date":
-                stay_date,
-            "Available":
-                available,
-            "Observed":
-                observed,
+            "Date": stay_date,
+            "Available": available,
+            "Observed": observed,
             "Market availability":
                 availability_pct,
-            "Recent losses":
-                losses,
-            "Recent openings":
-                openings,
-            "Signal":
-                signal,
+            "Recent losses": losses,
+            "Recent openings": openings,
+            "Signal": signal,
         }
     )
 
@@ -797,10 +802,8 @@ else:
     )
 
 st.caption(
-    "The chart shows the percentage of tracked competitors "
-    "displaying availability for each date. 0% means none "
-    "of the tracked competitors are showing availability; "
-    "100% means all four are showing availability."
+    "Percentage of tracked competitors displaying "
+    "availability for each date."
 )
 
 
@@ -816,12 +819,10 @@ market_display = (
     market_df.copy()
 )
 
-market_display["Date"] = (
-    pd.to_datetime(
-        market_display["Date"]
-    ).dt.strftime(
-        "%a %d %b"
-    )
+market_display["Date"] = pd.to_datetime(
+    market_display["Date"]
+).dt.strftime(
+    "%a %d %b"
 )
 
 market_display[
@@ -847,18 +848,16 @@ market_display[
         else "No data"
 )
 
-market_display = (
-    market_display[
-        [
-            "Date",
-            "Available competitors",
-            "Market availability",
-            "Recent losses",
-            "Recent openings",
-            "Signal",
-        ]
+market_display = market_display[
+    [
+        "Date",
+        "Available competitors",
+        "Market availability",
+        "Recent losses",
+        "Recent openings",
+        "Signal",
     ]
-)
+]
 
 st.dataframe(
     market_display,
@@ -868,10 +867,9 @@ st.dataframe(
 )
 
 st.caption(
-    "Market availability is based on the four tracked "
-    "competitors. A tight signal means fewer tracked "
-    "listings are showing availability. It does not prove "
-    "that unavailable properties are booked."
+    "A tight signal means fewer tracked listings are "
+    "showing availability. Unavailable does not prove "
+    "that a property has been booked."
 )
 
 
@@ -895,18 +893,16 @@ if changes_df.empty:
 
 else:
 
-    changes_display = (
-        changes_df[
-            [
-                "competitor",
-                "stay_date",
-                "previous",
-                "current",
-                "change",
-                "observed_at",
-            ]
-        ].copy()
-    )
+    changes_display = changes_df[
+        [
+            "competitor",
+            "stay_date",
+            "previous",
+            "current",
+            "change",
+            "observed_at",
+        ]
+    ].copy()
 
     changes_display = (
         changes_display.rename(
@@ -951,9 +947,8 @@ else:
         )
     )
 
-    changes_display = (
-        changes_display
-        .sort_values(
+    st.dataframe(
+        changes_display.sort_values(
             [
                 "Detected",
                 "Stay date",
@@ -962,11 +957,7 @@ else:
                 False,
                 True,
             ],
-        )
-    )
-
-    st.dataframe(
-        changes_display,
+        ),
         use_container_width=True,
         hide_index=True,
     )
@@ -1026,10 +1017,8 @@ st.dataframe(
 
 st.caption(
     "🟢 Available = Airbnb currently allows the date. "
-    "🔴 Unavailable does not necessarily mean booked; "
-    "it may be booked, blocked or restricted. "
-    "💰 Price is the average nightly value of an observed "
-    "2-night stay quote, not an exact nightly rate."
+    "🔴 Unavailable may mean booked, blocked or restricted. "
+    "💰 Prices are observed 2-night stay quotes."
 )
 
 
@@ -1049,21 +1038,18 @@ if price_df.empty:
 
     st.info(
         "Not enough price data yet. "
-        "This chart will populate automatically "
-        "as new price observations are collected."
+        "The chart will populate automatically."
     )
 
 else:
 
-    price_chart_df = (
-        price_df[
-            [
-                "checkin_date",
-                "competitor",
-                "average_price_per_night_aud",
-            ]
-        ].copy()
-    )
+    price_chart_df = price_df[
+        [
+            "checkin_date",
+            "competitor",
+            "average_price_per_night_aud",
+        ]
+    ].copy()
 
     price_chart_df = (
         price_chart_df.dropna(
@@ -1073,12 +1059,10 @@ else:
         )
     )
 
-    price_chart = (
-        price_chart_df.pivot(
-            index="checkin_date",
-            columns="competitor",
-            values="average_price_per_night_aud",
-        )
+    price_chart = price_chart_df.pivot(
+        index="checkin_date",
+        columns="competitor",
+        values="average_price_per_night_aud",
     )
 
     existing_competitors = [
@@ -1104,11 +1088,9 @@ else:
         )
 
         st.caption(
-            "Each line represents the observed average "
-            "nightly price for a 2-night Airbnb quote. "
-            "Missing points remain empty. The dashboard "
-            "does not estimate or interpolate missing "
-            "competitor prices."
+            "Average nightly value from observed "
+            "2-night competitor quotes. Missing prices "
+            "are not estimated or interpolated."
         )
 
     else:
@@ -1127,6 +1109,8 @@ st.subheader(
     "📊 Market average observed price"
 )
 
+market_price = pd.DataFrame()
+
 if price_df.empty:
 
     st.info(
@@ -1135,21 +1119,18 @@ if price_df.empty:
 
 else:
 
-    market_price_source = (
-        price_df[
-            [
-                "checkin_date",
-                "competitor",
-                "average_price_per_night_aud",
-            ]
+    market_price_source = price_df[
+        [
+            "checkin_date",
+            "competitor",
+            "total_price_aud",
+            "average_price_per_night_aud",
         ]
-        .dropna(
-            subset=[
-                "average_price_per_night_aud"
-            ]
-        )
-        .copy()
-    )
+    ].dropna(
+        subset=[
+            "total_price_aud"
+        ]
+    ).copy()
 
     market_price = (
         market_price_source
@@ -1157,7 +1138,11 @@ else:
             "checkin_date"
         )
         .agg(
-            market_average=(
+            market_total=(
+                "total_price_aud",
+                "mean",
+            ),
+            market_average_nightly=(
                 "average_price_per_night_aud",
                 "mean",
             ),
@@ -1175,8 +1160,7 @@ else:
     if market_price.empty:
 
         st.info(
-            "No market average can be "
-            "calculated yet."
+            "No market average can be calculated yet."
         )
 
     else:
@@ -1185,7 +1169,7 @@ else:
             market_price[
                 [
                     "checkin_date",
-                    "market_average",
+                    "market_average_nightly",
                 ]
             ]
             .set_index(
@@ -1197,17 +1181,6 @@ else:
             market_price_chart,
             height=350,
         )
-
-        st.caption(
-            "The market average uses only competitors "
-            "that returned a valid quote for that check-in "
-            "date. Missing competitor prices are not "
-            "estimated."
-        )
-
-        # ------------------------------------------
-        # MARKET PRICE SUPPORT TABLE
-        # ------------------------------------------
 
         market_price_display = (
             market_price.copy()
@@ -1224,16 +1197,25 @@ else:
         )
 
         market_price_display[
-            "Market average A$/night"
+            "Market 2-night total"
         ] = market_price_display[
-            "market_average"
+            "market_total"
         ].apply(
             lambda x:
                 f"A${x:,.2f}"
         )
 
         market_price_display[
-            "Price coverage"
+            "Market avg/night"
+        ] = market_price_display[
+            "market_average_nightly"
+        ].apply(
+            lambda x:
+                f"A${x:,.2f}"
+        )
+
+        market_price_display[
+            "Coverage"
         ] = market_price_display[
             "competitors_with_price"
         ].apply(
@@ -1241,27 +1223,22 @@ else:
                 f"{int(x)}/4"
         )
 
-        market_price_display = (
+        st.dataframe(
             market_price_display[
                 [
                     "Check-in",
-                    "Market average A$/night",
-                    "Price coverage",
+                    "Market 2-night total",
+                    "Market avg/night",
+                    "Coverage",
                 ]
-            ]
-        )
-
-        st.dataframe(
-            market_price_display,
+            ],
             use_container_width=True,
             hide_index=True,
         )
 
         st.caption(
-            "Price coverage shows how many of the four "
-            "tracked competitors contributed to each "
-            "average. A 4/4 average is more representative "
-            "than a 1/4 average."
+            "Market averages use only competitors that "
+            "returned a valid 2-night quote."
         )
 
 
@@ -1269,7 +1246,360 @@ st.divider()
 
 
 # ==================================================
-# LATEST PRICE QUOTES
+# SUGGESTED PRICE FOR OUR APARTMENT
+# ==================================================
+
+st.subheader(
+    "🎯 Suggested price for our apartment"
+)
+
+st.caption(
+    "Based on a 2-night stay with A$50 cleaning. "
+    "The suggested nightly rate is designed to keep our "
+    "2-night total aligned with observed competitor pricing."
+)
+
+
+if market_price.empty:
+
+    st.info(
+        "Suggested prices will appear once valid "
+        "competitor price quotes are available."
+    )
+
+else:
+
+    suggested_rows = []
+
+    for _, row in market_price.iterrows():
+
+        checkin_date = row[
+            "checkin_date"
+        ]
+
+        market_total = row[
+            "market_total"
+        ]
+
+        coverage = int(
+            row[
+                "competitors_with_price"
+            ]
+        )
+
+        # Find availability signal
+        signal_match = market_df[
+            market_df["Date"]
+            == checkin_date
+        ]
+
+        if signal_match.empty:
+
+            signal = "⚪ No data"
+            availability = None
+
+        else:
+
+            signal = (
+                signal_match.iloc[0][
+                    "Signal"
+                ]
+            )
+
+            availability = (
+                signal_match.iloc[0][
+                    "Market availability"
+                ]
+            )
+
+        # Demand adjustment
+        adjustment = market_adjustment(
+            signal
+        )
+
+        # Target total for the whole 2-night stay
+        target_total = (
+            market_total
+            * adjustment
+        )
+
+        # Remove our A$50 cleaning fee before
+        # calculating our accommodation nightly rate
+        accommodation_total = (
+            target_total
+            - CLEANING_FEE
+        )
+
+        raw_nightly = (
+            accommodation_total
+            / STAY_NIGHTS
+        )
+
+        suggested_nightly = (
+            round_to_nearest_5(
+                raw_nightly
+            )
+        )
+
+        # Recalculate our actual guest subtotal
+        # after rounding nightly price
+        our_two_night_total = (
+            suggested_nightly
+            * STAY_NIGHTS
+            + CLEANING_FEE
+        )
+
+        # Difference vs observed competitor average
+        difference_vs_market = (
+            our_two_night_total
+            - market_total
+        )
+
+        difference_pct = (
+            (
+                difference_vs_market
+                / market_total
+            )
+            * 100
+            if market_total
+            else 0
+        )
+
+        # Estimated Airbnb host fee + GST
+        estimated_airbnb_fee = (
+            our_two_night_total
+            * AIRBNB_FEE_RATE
+        )
+
+        estimated_payout = (
+            our_two_night_total
+            - estimated_airbnb_fee
+        )
+
+        suggested_rows.append(
+            {
+                "checkin_date":
+                    checkin_date,
+                "market_total":
+                    market_total,
+                "coverage":
+                    coverage,
+                "availability":
+                    availability,
+                "signal":
+                    signal,
+                "target_total":
+                    target_total,
+                "suggested_nightly":
+                    suggested_nightly,
+                "cleaning":
+                    CLEANING_FEE,
+                "our_total":
+                    our_two_night_total,
+                "difference":
+                    difference_vs_market,
+                "difference_pct":
+                    difference_pct,
+                "airbnb_fee":
+                    estimated_airbnb_fee,
+                "estimated_payout":
+                    estimated_payout,
+                "confidence":
+                    confidence_label(
+                        coverage
+                    ),
+            }
+        )
+
+
+    suggested_df = pd.DataFrame(
+        suggested_rows
+    )
+
+
+    # ----------------------------------------------
+    # SUGGESTED PRICE CHART
+    # ----------------------------------------------
+
+    if not suggested_df.empty:
+
+        suggested_chart = (
+            suggested_df[
+                [
+                    "checkin_date",
+                    "suggested_nightly",
+                ]
+            ]
+            .set_index(
+                "checkin_date"
+            )
+        )
+
+        st.line_chart(
+            suggested_chart,
+            height=350,
+        )
+
+
+        # ------------------------------------------
+        # SUGGESTED PRICE TABLE
+        # ------------------------------------------
+
+        suggested_display = (
+            suggested_df.copy()
+        )
+
+        suggested_display[
+            "Date"
+        ] = pd.to_datetime(
+            suggested_display[
+                "checkin_date"
+            ]
+        ).dt.strftime(
+            "%a %d %b"
+        )
+
+        suggested_display[
+            "Market 2-night avg"
+        ] = suggested_display[
+            "market_total"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+        suggested_display[
+            "Coverage"
+        ] = suggested_display[
+            "coverage"
+        ].apply(
+            lambda x:
+                f"{int(x)}/4"
+        )
+
+        suggested_display[
+            "Availability"
+        ] = suggested_display[
+            "availability"
+        ].apply(
+            lambda x:
+                f"{x:.0f}%"
+                if pd.notna(x)
+                else "No data"
+        )
+
+        suggested_display[
+            "Target 2-night total"
+        ] = suggested_display[
+            "target_total"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+        suggested_display[
+            "Suggested/night"
+        ] = suggested_display[
+            "suggested_nightly"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+        suggested_display[
+            "Cleaning"
+        ] = suggested_display[
+            "cleaning"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+        suggested_display[
+            "Our 2-night total"
+        ] = suggested_display[
+            "our_total"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+        suggested_display[
+            "vs market"
+        ] = suggested_display.apply(
+            lambda row:
+                (
+                    f"{row['difference_pct']:+.1f}% "
+                    f"(A${row['difference']:+,.0f})"
+                ),
+            axis=1,
+        )
+
+        suggested_display[
+            "Est. Airbnb fee"
+        ] = suggested_display[
+            "airbnb_fee"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+        suggested_display[
+            "Est. payout"
+        ] = suggested_display[
+            "estimated_payout"
+        ].apply(
+            lambda x:
+                f"A${x:,.0f}"
+        )
+
+
+        st.dataframe(
+            suggested_display[
+                [
+                    "Date",
+                    "Market 2-night avg",
+                    "Coverage",
+                    "Availability",
+                    "signal",
+                    "Target 2-night total",
+                    "Suggested/night",
+                    "Cleaning",
+                    "Our 2-night total",
+                    "vs market",
+                    "Est. Airbnb fee",
+                    "Est. payout",
+                    "confidence",
+                ]
+            ].rename(
+                columns={
+                    "signal":
+                        "Market signal",
+                    "confidence":
+                        "Confidence",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=500,
+        )
+
+
+        st.caption(
+            "Suggested/night is the accommodation rate to "
+            "enter into Airbnb. A$50 cleaning is then added "
+            "to produce Our 2-night total. Estimated payout "
+            "uses an assumed 17.05% host fee including GST. "
+            "Low-coverage recommendations should be treated "
+            "with caution."
+        )
+
+
+st.divider()
+
+
+# ==================================================
+# LATEST OBSERVED PRICE QUOTES
 # ==================================================
 
 st.subheader(
@@ -1280,45 +1610,41 @@ st.subheader(
 if price_df.empty:
 
     st.info(
-        "No price quotes are currently "
-        "available for the selected period."
+        "No price quotes are currently available "
+        "for the selected period."
     )
 
 else:
 
-    price_table = (
-        price_df[
-            [
-                "competitor",
-                "checkin_date",
-                "checkout_date",
-                "nights",
-                "total_price_aud",
-                "average_price_per_night_aud",
-                "observed_at",
-            ]
-        ].copy()
-    )
+    price_table = price_df[
+        [
+            "competitor",
+            "checkin_date",
+            "checkout_date",
+            "nights",
+            "total_price_aud",
+            "average_price_per_night_aud",
+            "observed_at",
+        ]
+    ].copy()
 
-    price_table = (
-        price_table.rename(
-            columns={
-                "competitor":
-                    "Competitor",
-                "checkin_date":
-                    "Check-in",
-                "checkout_date":
-                    "Check-out",
-                "nights":
-                    "Nights",
-                "total_price_aud":
-                    "Total A$",
-                "average_price_per_night_aud":
-                    "Average A$/night",
-                "observed_at":
-                    "Observed",
-            }
-        )
+    price_table = price_table.rename(
+        columns={
+            "competitor":
+                "Competitor",
+            "checkin_date":
+                "Check-in",
+            "checkout_date":
+                "Check-out",
+            "nights":
+                "Nights",
+            "total_price_aud":
+                "Total A$",
+            "average_price_per_night_aud":
+                "Average A$/night",
+            "observed_at":
+                "Observed",
+        }
     )
 
     price_table[
